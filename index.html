@@ -267,22 +267,109 @@
         });
 
         function processRecipe(text) {
-            const rawLines = text.split(/\n+/);
-            let cleanSteps = [];
-
-            rawLines.forEach(line => {
-                let trimmed = line.trim();
-                trimmed = trimmed.replace(/^[\d\-\.\)]+\s*/, ''); // Remove numbering
-                if (trimmed.length > 0) {
-                    cleanSteps.push(trimmed);
+            let lines = text.split(/\n+/);
+            
+            // --- PHASE 1: SECTION ISOLATION ---
+            // Look for "Instructions" strictly to skip ingredients/intro
+            const instructionKeywords = ['instructions', 'directions', 'method', 'preparation', 'how to make', 'steps'];
+            let startIdx = -1;
+            
+            for (let i = 0; i < lines.length; i++) {
+                // Normalize line: remove colons, dashes, extra spaces
+                const line = lines[i].trim().toLowerCase().replace(/[:\-\*]/g, '');
+                // Check exact match or "Instructions:" to avoid false positives like "Read instructions below"
+                if (instructionKeywords.includes(line)) {
+                    startIdx = i + 1;
+                    break;
                 }
+            }
+            
+            if (startIdx > -1) {
+                lines = lines.slice(startIdx);
+            }
+
+            let cleanSteps = [];
+            
+            // List of verbs common in cooking steps. used to validate short lines.
+            const cookingVerbs = [
+                'add', 'mix', 'stir', 'bake', 'boil', 'heat', 'cut', 'chop', 'place', 'pour', 'whisk', 
+                'serve', 'cook', 'preheat', 'combine', 'simmer', 'roast', 'fry', 'saute', 'garnish', 
+                'season', 'melt', 'knead', 'peel', 'grate', 'roll', 'spread', 'wait', 'remove', 'turn', 
+                'flip', 'cover', 'cool', 'refrigerate', 'sprinkle', 'drain', 'arrange', 'divide', 'mash',
+                'blend', 'squeeze', 'wash', 'rinse', 'dry', 'pat', 'slice', 'dice', 'mince'
+            ];
+
+            // --- PHASE 2: LINE-BY-LINE FILTERING ---
+            lines.forEach(line => {
+                let trimmed = line.trim();
+                
+                if (!trimmed) return;
+
+                const lower = trimmed.toLowerCase();
+
+                // 1. HARD JUNK FILTER (Metadata, UI elements, Links, Copyright)
+                if (
+                    lower.includes('prep time') || lower.includes('cook time') || lower.includes('total time') ||
+                    lower.startsWith('servings') || lower.startsWith('calories') || lower.startsWith('author') ||
+                    lower.startsWith('yield') || lower.startsWith('course') || lower.startsWith('cuisine') ||
+                    lower.startsWith('keyword') || lower.includes('kcal') ||
+                    lower.includes('jump to') || lower.includes('print recipe') || lower.includes('pin recipe') ||
+                    lower.includes('rate this') || lower.includes('votes') || lower.includes('review') ||
+                    lower.includes('instagram') || lower.includes('facebook') || lower.includes('pinterest') ||
+                    lower.includes('http') || lower.includes('www.') || lower.includes('.com') ||
+                    lower.includes('copyright') || lower.includes('all rights reserved') || lower.includes('©') ||
+                    lower.includes('nutrition') || lower.includes('subscribe') || lower.includes('sign up') ||
+                    lower.startsWith('notes')
+                ) return;
+
+                // 2. INGREDIENT DETECTION (Heuristic)
+                // Regex checks for Number -> Unit. (e.g., "1 cup", "2.5 tbsp")
+                const ingredientRegex = /^[\d\u00BC-\u00BE\u2150-\u215E]+[\s-]*\/?[\s\d]*\s*(cup|tsp|tbsp|tablespoon|teaspoon|oz|ounce|gram|g|ml|lb|pound|stick|clove|pinch|quart|gallon|liter|slice|can|package|bunch)s?\b/i;
+                
+                // If it looks like an ingredient line, skip it.
+                // Exception: Long lines (instructions) might start with "1 cup of water is added..." so check length.
+                if (trimmed.length < 80 && ingredientRegex.test(trimmed)) {
+                    return; 
+                }
+
+                // 3. CLEANING
+                // Remove leading numbers (1. 2. 3.), letters (A. B.), bullets (-, *)
+                let cleanLine = trimmed.replace(/^(?:step\s*)?(?:[\d]+|[a-z])[\.\)\-\:]\s+/i, '')
+                                         .replace(/^[\-\*•]\s+/, '');
+
+                // 4. VERB CHECK FOR SHORT LINES
+                // If a line is short (under 60 chars) and DOESN'T contain a cooking verb, it's likely junk.
+                // Exception: Common short endings like "Serve." or "Enjoy."
+                if (cleanLine.length < 60) {
+                    const hasVerb = cookingVerbs.some(verb => lower.includes(verb));
+                    const isCommonClosing = lower.includes('enjoy') || lower.includes('bon app') || lower.includes('serve');
+                    
+                    if (!hasVerb && !isCommonClosing) return;
+                }
+
+                // 5. SANITY CHECK
+                if (cleanLine.length < 5) return;
+                if (!/[a-zA-Z]/.test(cleanLine)) return; // Must contain letters (avoids "123")
+
+                cleanSteps.push(cleanLine);
             });
 
-            if (cleanSteps.length <= 1 && text.length > 50) {
-                 // Fallback to sentence splitting
-                 cleanSteps = text.match(/[^\.!\?]+[\.!\?]+/g) || [text];
-                 cleanSteps = cleanSteps.map(s => s.trim());
+            // --- PHASE 3: FALLBACK ---
+            // If filtering killed everything, try sentence splitting on the raw text
+            if (cleanSteps.length === 0 || (cleanSteps.length === 1 && cleanSteps[0].length > 150)) {
+                // Use the original text (or the surviving single step)
+                const sourceText = cleanSteps.length === 1 ? cleanSteps[0] : (startIdx > -1 ? lines.join(' ') : text);
+                
+                const sentences = sourceText.match(/[^\.!\?]+[\.!\?]+/g);
+                
+                if (sentences) {
+                    cleanSteps = sentences.map(s => s.trim()).filter(s => s.length > 10);
+                } else {
+                     cleanSteps = [text];
+                }
             }
+            
+            if (cleanSteps.length === 0) cleanSteps = ["Could not parse recipe. Please try pasting again."];
 
             state.steps = cleanSteps;
             state.currentStep = 0;
